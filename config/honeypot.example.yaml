@@ -1,0 +1,55 @@
+# Backrooms Honeypot Labyrinth configuration
+# Usage: backrooms honeypot deploy --config config/honeypot.example.yaml
+
+network: "172.28.0.0/16"
+subnet: "172.28.0.0/24"
+gateway: "172.28.0.1"
+
+decoys:
+  - name: dc01
+    hostname: DC01-CORP
+    services: [ssh, http, smb, rdp]
+    fake_users:
+      - username: admin
+        password: admin123
+      - username: backup_svc
+        password: Backup#2024
+
+  - name: web-prod
+    hostname: web-prod
+    services: [http, ssh]
+    fake_users:
+      - username: deploy
+        password: Deploy@corp
+
+  - name: db01
+    hostname: db-primary
+    services: [mysql, postgres, ssh]
+    fake_users:
+      - username: dba
+        password: dba#admin
+
+  - name: backup
+    hostname: backup-server
+    services: [ftp, http, ssh]
+    fake_users:
+      - username: ftpuser
+        password: ftp#backup
+
+  - name: dev-box
+    hostname: dev-workstation
+    services: [telnet, http]
+    fake_users:
+      - username: developer
+        password: Dev#1234
+
+labyrinth:
+  max_hops: 5
+  redirect_delay: 2.0
+
+ids:
+  enabled: true
+  alert_on:
+    - privilege_escalation
+    - lateral_movement
+    - credential_dumping

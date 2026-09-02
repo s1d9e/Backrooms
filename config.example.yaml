@@ -1,0 +1,7 @@
+# Backrooms configuration
+# Location: ~/.config/backrooms/config.yaml
+
+scan:
+  threads: 100          # Concurrent probes during scans
+  timeout: 1.0          # Probe timeout in seconds
+  retries: 1            # Number of retries per probe
