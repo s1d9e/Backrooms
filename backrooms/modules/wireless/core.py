@@ -117,8 +117,8 @@ def scan_access_points(interface: str, timeout: float = 3.0) -> ScanResult:
             raise _StopScan
         if not pkt.haslayer("Dot11"):
             return
-        if not (pkt.type == 0 and (pkt.subtype == 8 or pkt.subtype == 0)):
-            # not a management beacon/probe-resp carrying identity
+        # Management frames: 0=assoc-req, 4=probe-req, 5=probe-resp, 8=beacon.
+        if pkt.type != 0 or pkt.subtype not in (5, 8):
             return
         bssid = _mac(pkt.addr2)
         ssid, channel, privacy = _beacon_info(pkt)
@@ -203,30 +203,23 @@ def _mac(addr: tuple[int, ...] | None) -> str:
 
 
 def _beacon_info(pkt) -> tuple[str | None, int, bool]:  # type: ignore[no-untyped-def]
-    """Extract SSID/channel/privacy from a Dot11 frame, best effort."""
-    ssid = None
+    """Extract SSID/channel/privacy from a Dot11 beacon/probe-resp frame."""
+    ssid: str | None = None
     channel = 0
     privacy = False
     try:
-        if pkt.haslayer("Dot11ProbeResp") and pkt.info:
-            ssid = pkt.info.decode(errors="replace")
         if pkt.haslayer("Dot11Elt"):
             for elt in pkt.getlayer("Dot11Elt").iterpayloads():
-                if elt.ID == 0 and isinstance(elt.info, bytes):
+                if elt.ID == 0 and isinstance(elt.info, bytes):  # SSID element
                     try:
                         ssid = elt.info.decode("utf-8", errors="replace")
                     except (AttributeError, ValueError):
                         pass
-                elif elt.ID == 3 and isinstance(elt.info, bytes) and len(elt.info) >= 1:
-                    channel = elt.info[0]
-        privacy = bool(pkt.getlayer("Dot11Elt") and _privacy_flag(pkt))
+                elif elt.ID == 3 and isinstance(elt.info, bytes):  # DS parameter set -> channel
+                    if elt.info:
+                        channel = elt.info[0]
+                elif elt.ID in (48, 0x30):  # RSN element -> WPA2/3
+                    privacy = True
     except (AttributeError, ValueError, TypeError, IndexError):
         pass
     return ssid, channel, privacy
-
-
-def _privacy_flag(pkt) -> bool:  # type: ignore[no-untyped-def]
-    for elt in pkt.getlayer("Dot11Elt").iterpayloads():
-        if elt.ID == 48 or elt.ID == 0x30:  # RSN -> WPA2/3
-            return True
-    return False

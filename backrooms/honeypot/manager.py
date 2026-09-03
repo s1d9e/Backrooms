@@ -85,7 +85,7 @@ def ssh_srv():
         threading.Thread(target=ssh_handle, args=(conn,), daemon=True).start()
 
 
-def ssh_handle(conn, addr):
+def ssh_handle(conn):
     log("ssh_handshake", "banner offered", peer_ip(conn))
     ident = ("SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u2").encode()
     conn.sendall(ident + b"\r\n")
